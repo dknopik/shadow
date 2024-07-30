@@ -534,6 +534,7 @@ impl SyscallHandler {
             | SyscallNum::NR_madvise
             | SyscallNum::NR_mkdir
             | SyscallNum::NR_mknod
+            | SyscallNum::NR_msync
             | SyscallNum::NR_readlink
             | SyscallNum::NR_removexattr
             | SyscallNum::NR_rename

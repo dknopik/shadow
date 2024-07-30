@@ -346,12 +346,10 @@ impl Worker {
         let src_ip: std::net::Ipv4Addr = u32::from_be(src_ip).into();
         let dst_ip: std::net::Ipv4Addr = u32::from_be(dst_ip).into();
 
-        let dst_host_id = Worker::with(|w| {
-            w.shared
-                .resolve_ip_to_host_id(dst_ip)
-                .expect("No host ID for dest address {dst_ip}")
-        })
-        .unwrap();
+        let Some(dst_host_id) = Worker::with(|w| w.shared.resolve_ip_to_host_id(dst_ip)).unwrap()
+        else {
+            panic!("No host ID for dest address {dst_ip} from source {src_ip}")
+        };
 
         let src_ip = std::net::IpAddr::V4(src_ip);
         let dst_ip = std::net::IpAddr::V4(dst_ip);

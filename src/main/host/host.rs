@@ -978,7 +978,7 @@ impl Host {
     /// In the latter case, if the packet destination is not on this host, we
     /// return the router to route it to the correct host.
     pub fn get_packet_device(&self, address: Ipv4Addr) -> Ref<dyn PacketDevice> {
-        if address == Ipv4Addr::LOCALHOST {
+        if address.is_loopback() {
             self.net_ns.localhost.borrow()
         } else if address == self.default_ip() {
             self.net_ns.internet.borrow()
