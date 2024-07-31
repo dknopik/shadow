@@ -52,6 +52,7 @@
 mod bindings;
 
 pub mod capability;
+pub mod close_range;
 pub mod epoll;
 pub mod errno;
 pub mod exit;
@@ -72,6 +73,7 @@ pub mod rtnetlink;
 pub mod sched;
 pub mod signal;
 pub mod socket;
+pub mod stat;
 pub mod syscall;
 pub mod sysinfo;
 pub mod time;

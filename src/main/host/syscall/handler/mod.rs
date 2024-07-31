@@ -28,6 +28,7 @@ use crate::utility::counter::Counter;
 use crate::utility::perf_timer::PerfTimer;
 
 mod clone;
+mod close_range;
 mod epoll;
 mod eventfd;
 mod fcntl;
@@ -45,6 +46,7 @@ mod select;
 mod shadow;
 mod signal;
 mod socket;
+mod stat;
 mod sysinfo;
 mod time;
 mod timerfd;
@@ -359,11 +361,13 @@ impl SyscallHandler {
             SyscallNum::NR_brk => handle!(brk),
             SyscallNum::NR_capget => handle!(capget),
             SyscallNum::NR_capset => handle!(capset),
+            SyscallNum::NR_chdir => handle!(chdir),
             SyscallNum::NR_clock_getres => handle!(clock_getres),
             SyscallNum::NR_clock_nanosleep => handle!(clock_nanosleep),
             SyscallNum::NR_clone => handle!(clone),
             SyscallNum::NR_clone3 => handle!(clone3),
             SyscallNum::NR_close => handle!(close),
+            SyscallNum::NR_close_range => handle!(close_range),
             SyscallNum::NR_connect => handle!(connect),
             SyscallNum::NR_creat => handle!(creat),
             SyscallNum::NR_dup => handle!(dup),
