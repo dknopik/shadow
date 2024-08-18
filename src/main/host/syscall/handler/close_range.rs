@@ -1,31 +1,34 @@
 use linux_api::close_range::CloseRangeFlags;
 use linux_api::errno::Errno;
 use linux_api::fcntl::DescriptorFlags;
-use syscall_logger::log_syscall;
 
 use crate::host::descriptor::descriptor_table;
 use crate::host::syscall::handler::{SyscallContext, SyscallHandler};
-use crate::host::syscall::types::SyscallError;
 use crate::utility::callback_queue::CallbackQueue;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* first */ std::ffi::c_uint,
-                  /* last */ std::ffi::c_uint, /* flags */ CloseRangeFlags)]
+    log_syscall!(
+        close_range,
+        /* rv */ std::ffi::c_int,
+        /* first */ std::ffi::c_uint,
+        /* last */ std::ffi::c_uint,
+        /* flags */ CloseRangeFlags,
+    );
     pub fn close_range(
         ctx: &mut SyscallContext,
         first: std::ffi::c_uint,
         last: std::ffi::c_uint,
         flags: std::ffi::c_uint,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), Errno> {
         // close_range(2):
         // > EINVAL: [...], or first is greater than last.
         if first > last {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         // if the start of the range is larger than the max possible fd, then do nothing
         if first > descriptor_table::FD_MAX {
-            return Ok(0);
+            return Ok(());
         }
 
         // restrict the end of the range to the max possible fd
@@ -39,12 +42,12 @@ impl SyscallHandler {
 
         let Some(flags) = CloseRangeFlags::from_bits(flags) else {
             log::debug!("Invalid close_range flags: {flags}");
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
 
         if flags.contains(CloseRangeFlags::CLOSE_RANGE_UNSHARE) {
             log::debug!("The CLOSE_RANGE_UNSHARE flag is not implemented");
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         let mut desc_table = ctx.objs.thread.descriptor_table_borrow_mut(ctx.objs.host);
@@ -76,6 +79,6 @@ impl SyscallHandler {
             });
         }
 
-        Ok(0)
+        Ok(())
     }
 }

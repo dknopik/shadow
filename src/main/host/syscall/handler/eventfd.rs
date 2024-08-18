@@ -4,29 +4,36 @@ use atomic_refcell::AtomicRefCell;
 use linux_api::errno::Errno;
 use linux_api::fcntl::DescriptorFlags;
 use nix::sys::eventfd::EfdFlags;
-use syscall_logger::log_syscall;
 
+use crate::host::descriptor::descriptor_table::DescriptorHandle;
 use crate::host::descriptor::eventfd;
 use crate::host::descriptor::{CompatFile, Descriptor, File, FileStatus, OpenFile};
 use crate::host::syscall::handler::{SyscallContext, SyscallHandler};
-use crate::host::syscall::types::SyscallError;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* initval */ std::ffi::c_uint)]
+    log_syscall!(
+        eventfd,
+        /* rv */ std::ffi::c_int,
+        /* initval */ std::ffi::c_uint,
+    );
     pub fn eventfd(
         ctx: &mut SyscallContext,
         init_val: std::ffi::c_uint,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<DescriptorHandle, Errno> {
         Self::eventfd_helper(ctx, init_val, 0)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* initval */ std::ffi::c_uint,
-                  /* flags */ nix::sys::eventfd::EfdFlags)]
+    log_syscall!(
+        eventfd2,
+        /* rv */ std::ffi::c_int,
+        /* initval */ std::ffi::c_uint,
+        /* flags */ nix::sys::eventfd::EfdFlags,
+    );
     pub fn eventfd2(
         ctx: &mut SyscallContext,
         init_val: std::ffi::c_uint,
         flags: std::ffi::c_int,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<DescriptorHandle, Errno> {
         Self::eventfd_helper(ctx, init_val, flags)
     }
 
@@ -34,19 +41,15 @@ impl SyscallHandler {
         ctx: &mut SyscallContext,
         init_val: std::ffi::c_uint,
         flags: std::ffi::c_int,
-    ) -> Result<std::ffi::c_int, SyscallError> {
-        log::trace!(
-            "eventfd() called with initval {} and flags {}",
-            init_val,
-            flags
-        );
+    ) -> Result<DescriptorHandle, Errno> {
+        log::trace!("eventfd() called with initval {init_val} and flags {flags}");
 
         // get the flags
         let flags = match EfdFlags::from_bits(flags) {
             Some(x) => x,
             None => {
                 log::warn!("Invalid eventfd flags: {}", flags);
-                return Err(Errno::EINVAL.into());
+                return Err(Errno::EINVAL);
             }
         };
 
@@ -81,6 +84,6 @@ impl SyscallHandler {
 
         log::trace!("eventfd() returning fd {}", fd);
 
-        Ok(fd.val().try_into().unwrap())
+        Ok(fd)
     }
 }

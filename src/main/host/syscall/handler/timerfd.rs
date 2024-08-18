@@ -8,9 +8,9 @@ use nix::sys::timerfd::{TimerFlags, TimerSetTimeFlags};
 use shadow_shim_helper_rs::{
     emulated_time::EmulatedTime, simulation_time::SimulationTime, syscall_types::ForeignPtr,
 };
-use syscall_logger::log_syscall;
 
 use crate::core::worker::Worker;
+use crate::host::descriptor::descriptor_table::DescriptorHandle;
 use crate::host::descriptor::{
     timerfd::TimerFd, CompatFile, Descriptor, File, FileStatus, OpenFile,
 };
@@ -21,12 +21,17 @@ use crate::host::{
 use crate::utility::callback_queue::CallbackQueue;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* clockid */ linux_api::time::ClockId, /* flags */ std::ffi::c_int)]
+    log_syscall!(
+        timerfd_create,
+        /* rv */ std::ffi::c_int,
+        /* clockid */ linux_api::time::ClockId,
+        /* flags */ std::ffi::c_int,
+    );
     pub fn timerfd_create(
         ctx: &mut SyscallContext,
         clockid: std::ffi::c_int,
         flags: std::ffi::c_int,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<DescriptorHandle, SyscallError> {
         let Ok(clockid) = ClockId::try_from(clockid) else {
             log::debug!("Invalid clockid: {clockid}");
             return Err(Errno::EINVAL.into());
@@ -64,15 +69,20 @@ impl SyscallHandler {
 
         log::trace!("timerfd_create() returning fd {fd}");
 
-        Ok(i32::try_from(fd.val()).unwrap())
+        Ok(fd)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* fd */ std::ffi::c_int, /*curr_value*/ *const std::ffi::c_void)]
+    log_syscall!(
+        timerfd_gettime,
+        /* rv */ std::ffi::c_int,
+        /* fd */ std::ffi::c_int,
+        /*curr_value*/ *const std::ffi::c_void,
+    );
     pub fn timerfd_gettime(
         ctx: &mut SyscallContext,
         fd: std::ffi::c_int,
         curr_value_ptr: ForeignPtr<linux_api::time::itimerspec>,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), SyscallError> {
         // Get the TimerFd object.
         let file = get_cloned_file(ctx, fd)?;
         let File::TimerFd(ref timerfd) = file else {
@@ -81,7 +91,7 @@ impl SyscallHandler {
 
         Self::timerfd_gettime_helper(ctx, timerfd, curr_value_ptr)?;
 
-        Ok(0)
+        Ok(())
     }
 
     fn timerfd_gettime_helper(
@@ -122,15 +132,21 @@ impl SyscallHandler {
         Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* fd */ std::ffi::c_int, /* flags */ std::ffi::c_int,
-                  /* new_value */ *const std::ffi::c_void, /* old_value */ *const std::ffi::c_void)]
+    log_syscall!(
+        timerfd_settime,
+        /* rv */ std::ffi::c_int,
+        /* fd */ std::ffi::c_int,
+        /* flags */ std::ffi::c_int,
+        /* new_value */ *const std::ffi::c_void,
+        /* old_value */ *const std::ffi::c_void,
+    );
     pub fn timerfd_settime(
         ctx: &mut SyscallContext,
         fd: std::ffi::c_int,
         flags: std::ffi::c_int,
         new_value_ptr: ForeignPtr<linux_api::time::itimerspec>,
         old_value_ptr: ForeignPtr<linux_api::time::itimerspec>,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), SyscallError> {
         let Some(flags) = TimerSetTimeFlags::from_bits(flags) else {
             log::debug!("Invalid timerfd_settime flags: {flags}");
             return Err(Errno::EINVAL.into());
@@ -191,7 +207,7 @@ impl SyscallHandler {
             );
         }
 
-        Ok(0)
+        Ok(())
     }
 }
 

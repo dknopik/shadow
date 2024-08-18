@@ -6,10 +6,10 @@ use linux_api::errno::Errno;
 use linux_api::fcntl::DescriptorFlags;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
-use syscall_logger::log_syscall;
 
 use crate::core::worker::Worker;
 use crate::cshadow;
+use crate::host::descriptor::descriptor_table::DescriptorHandle;
 use crate::host::descriptor::epoll::Epoll;
 use crate::host::descriptor::{CompatFile, Descriptor, File, FileState, OpenFile};
 use crate::host::memory_manager::MemoryManager;
@@ -18,37 +18,45 @@ use crate::host::syscall::types::{ForeignArrayPtr, SyscallError};
 use crate::utility::callback_queue::CallbackQueue;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* size */ std::ffi::c_int)]
+    log_syscall!(
+        epoll_create,
+        /* rv */ std::ffi::c_int,
+        /* size */ std::ffi::c_int,
+    );
     pub fn epoll_create(
         ctx: &mut SyscallContext,
         size: std::ffi::c_int,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<DescriptorHandle, Errno> {
         // epoll_create(2): "Since Linux 2.6.8, the size argument is ignored, but must be greater
         // than zero"
         if size <= 0 {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         Self::epoll_create_helper(ctx, 0)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* flags */ std::ffi::c_int)]
+    log_syscall!(
+        epoll_create1,
+        /* rv */ std::ffi::c_int,
+        /* flags */ std::ffi::c_int,
+    );
     pub fn epoll_create1(
         ctx: &mut SyscallContext,
         flags: std::ffi::c_int,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<DescriptorHandle, Errno> {
         Self::epoll_create_helper(ctx, flags)
     }
 
     fn epoll_create_helper(
         ctx: &mut SyscallContext,
         flags: std::ffi::c_int,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<DescriptorHandle, Errno> {
         // See here for the order that the input args are checked in Linux:
         // https://github.com/torvalds/linux/blob/2cf0f715623872823a72e451243bbf555d10d032/fs/eventpoll.c#L2030
         let Some(flags) = EpollCreateFlags::from_bits(flags) else {
             log::debug!("Invalid epoll_create flags: {flags}");
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
 
         let mut desc_flags = DescriptorFlags::empty();
@@ -70,18 +78,24 @@ impl SyscallHandler {
 
         log::trace!("Created epoll fd {fd}");
 
-        Ok(fd.val().try_into().unwrap())
+        Ok(fd)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* epfd */ std::ffi::c_int, /* op */ std::ffi::c_int,
-                  /* fd */ std::ffi::c_int, /* event */ *const std::ffi::c_void)]
+    log_syscall!(
+        epoll_ctl,
+        /* rv */ std::ffi::c_int,
+        /* epfd */ std::ffi::c_int,
+        /* op */ std::ffi::c_int,
+        /* fd */ std::ffi::c_int,
+        /* event */ *const std::ffi::c_void,
+    );
     pub fn epoll_ctl(
         ctx: &mut SyscallContext,
         epfd: std::ffi::c_int,
         op: std::ffi::c_int,
         fd: std::ffi::c_int,
         event_ptr: ForeignPtr<linux_api::epoll::epoll_event>,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), Errno> {
         // See here for the order that the input args are checked in Linux:
         // https://github.com/torvalds/linux/blob/2cf0f715623872823a72e451243bbf555d10d032/fs/eventpoll.c#L2111
 
@@ -93,13 +107,13 @@ impl SyscallHandler {
             let desc = Self::get_descriptor(&desc_table, epfd)?;
 
             let CompatFile::New(epoll) = desc.file() else {
-                return Err(Errno::EINVAL.into());
+                return Err(Errno::EINVAL);
             };
 
             let epoll_canon_handle = epoll.inner_file().canonical_handle();
 
             let File::Epoll(epoll) = epoll.inner_file() else {
-                return Err(Errno::EINVAL.into());
+                return Err(Errno::EINVAL);
             };
 
             (epoll, epoll_canon_handle)
@@ -119,7 +133,7 @@ impl SyscallHandler {
                     let file_type = unsafe { cshadow::legacyfile_getType(file.ptr()) };
                     if file_type == cshadow::_LegacyFileType_DT_FILE {
                         // Epoll doesn't support regular files.
-                        return Err(Errno::EPERM.into());
+                        return Err(Errno::EPERM);
                     } else {
                         // Our implementation doesn't support other legacy types.
                         // We don't think we have such types remaining, but warn anyway.
@@ -127,7 +141,7 @@ impl SyscallHandler {
                             "Attempted to add a legacy file to an epoll file, which \
                             shadow doesn't support"
                         );
-                        return Err(Errno::EINVAL.into());
+                        return Err(Errno::EINVAL);
                     }
                 }
             }
@@ -135,13 +149,13 @@ impl SyscallHandler {
 
         // An epoll instance is not allowed to monitor itself.
         if epoll_canon_handle == target.canonical_handle() {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         // Extract the operation.
         let Ok(op) = EpollCtlOp::try_from(op) else {
             log::debug!("Invalid epoll op: {op}");
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
 
         // Extract the events and data.
@@ -156,7 +170,7 @@ impl SyscallHandler {
             let Some(mut events) = EpollEvents::from_bits(ev.events) else {
                 // Braces are needed around `ev.events` for alignment (see rustc --explain E0793).
                 log::debug!("Invalid epoll_ctl events: {}", { ev.events });
-                return Err(Errno::EINVAL.into());
+                return Err(Errno::EINVAL);
             };
 
             // epoll_ctl(2): epoll always reports for EPOLLERR and EPOLLHUP
@@ -175,12 +189,17 @@ impl SyscallHandler {
                     .ctl(op, fd, target, events, data, weak_epoll, cb_queue)
             })
         })?;
-        Ok(0)
+        Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* epfd */ std::ffi::c_int,
-                  /* events */ *const std::ffi::c_void, /* max_events */ std::ffi::c_int,
-                  /* timeout */ std::ffi::c_int)]
+    log_syscall!(
+        epoll_wait,
+        /* rv */ std::ffi::c_int,
+        /* epfd */ std::ffi::c_int,
+        /* events */ *const std::ffi::c_void,
+        /* max_events */ std::ffi::c_int,
+        /* timeout */ std::ffi::c_int,
+    );
     pub fn epoll_wait(
         ctx: &mut SyscallContext,
         epfd: std::ffi::c_int,
@@ -193,10 +212,16 @@ impl SyscallHandler {
         Self::epoll_wait_helper(ctx, epfd, events_ptr, max_events, timeout, None)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* epfd */ std::ffi::c_int,
-                  /* events */ *const std::ffi::c_void, /* max_events */ std::ffi::c_int,
-                  /* timeout */ std::ffi::c_int, /* sigmask */ *const std::ffi::c_void,
-                  /* sigsetsize */ linux_api::posix_types::kernel_size_t)]
+    log_syscall!(
+        epoll_pwait,
+        /* rv */ std::ffi::c_int,
+        /* epfd */ std::ffi::c_int,
+        /* events */ *const std::ffi::c_void,
+        /* max_events */ std::ffi::c_int,
+        /* timeout */ std::ffi::c_int,
+        /* sigmask */ *const std::ffi::c_void,
+        /* sigsetsize */ linux_api::posix_types::kernel_size_t,
+    );
     pub fn epoll_pwait(
         ctx: &mut SyscallContext,
         epfd: std::ffi::c_int,
@@ -219,10 +244,16 @@ impl SyscallHandler {
         Self::epoll_wait_helper(ctx, epfd, events_ptr, max_events, timeout, sigmask)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* epfd */ std::ffi::c_int,
-                  /* events */ *const std::ffi::c_void, /* max_events */ std::ffi::c_int,
-                  /* timeout */ *const std::ffi::c_void, /* sigmask */ *const std::ffi::c_void,
-                  /* sigsetsize */ linux_api::posix_types::kernel_size_t)]
+    log_syscall!(
+        epoll_pwait2,
+        /* rv */ std::ffi::c_int,
+        /* epfd */ std::ffi::c_int,
+        /* events */ *const std::ffi::c_void,
+        /* max_events */ std::ffi::c_int,
+        /* timeout */ *const std::ffi::c_void,
+        /* sigmask */ *const std::ffi::c_void,
+        /* sigsetsize */ linux_api::posix_types::kernel_size_t,
+    );
     pub fn epoll_pwait2(
         ctx: &mut SyscallContext,
         epfd: std::ffi::c_int,
@@ -396,7 +427,7 @@ impl SyscallHandler {
 
 fn timeout_arg_to_maybe_simtime(
     timeout_ms: std::ffi::c_int,
-) -> Result<Option<SimulationTime>, SyscallError> {
+) -> Result<Option<SimulationTime>, Errno> {
     // epoll_wait(2): "Specifying a timeout of -1 causes epoll_wait() to block indefinitely"
     let timeout_ms = (timeout_ms >= 0).then_some(timeout_ms);
 
@@ -430,7 +461,7 @@ fn write_events_to_ptr(
     mem: &mut MemoryManager,
     ready: Vec<(EpollEvents, u64)>,
     events_ptr: ForeignPtr<linux_api::epoll::epoll_event>,
-) -> Result<(), SyscallError> {
+) -> Result<(), Errno> {
     let events_ptr = ForeignArrayPtr::new(events_ptr, ready.len());
     let mut mem_ref = mem.memory_ref_mut(events_ptr)?;
 

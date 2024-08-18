@@ -1,18 +1,21 @@
 use linux_api::sysinfo::sysinfo;
 use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
-use syscall_logger::log_syscall;
 
 use crate::core::worker::Worker;
 use crate::host::syscall::handler::{SyscallContext, SyscallHandler};
-use crate::host::syscall::types::SyscallResult;
+use crate::host::syscall::types::SyscallError;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* info */ *const linux_api::sysinfo::sysinfo)]
+    log_syscall!(
+        sysinfo,
+        /* rv */ std::ffi::c_int,
+        /* info */ *const linux_api::sysinfo::sysinfo,
+    );
     pub fn sysinfo(
         ctx: &mut SyscallContext,
         info_ptr: ForeignPtr<linux_api::sysinfo::sysinfo>,
-    ) -> SyscallResult {
+    ) -> Result<(), SyscallError> {
         // Seconds are needed for uptime.
         let seconds = Worker::current_time()
             .unwrap()
@@ -46,6 +49,6 @@ impl SyscallHandler {
             .process
             .memory_borrow_mut()
             .write(info_ptr, &info)?;
-        Ok(0.into())
+        Ok(())
     }
 }

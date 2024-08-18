@@ -347,7 +347,24 @@ impl SyscallHandler {
 
         macro_rules! handle {
             ($f:ident) => {{
-                SyscallHandlerFn::call(Self::$f, &mut ctx)
+                let rv = SyscallHandlerFn::call(Self::$f, &mut ctx);
+
+                // log the syscall if enabled
+                if let Some(strace_fmt_options) = ctx.objs.process.strace_logging_options() {
+                    ctx.objs.process.with_strace_file(|file| {
+                        crate::utility::macros::SyscallLogger::$f(
+                            file,
+                            ctx.args.args,
+                            &rv,
+                            strace_fmt_options,
+                            ctx.objs.thread.id(),
+                            &*ctx.objs.process.memory_borrow(),
+                        )
+                        .unwrap();
+                    });
+                }
+
+                rv
             }};
         }
 
@@ -389,6 +406,7 @@ impl SyscallHandler {
             SyscallNum::NR_fallocate => handle!(fallocate),
             SyscallNum::NR_fchmod => handle!(fchmod),
             SyscallNum::NR_fchmodat => handle!(fchmodat),
+            SyscallNum::NR_fchmodat2 => handle!(fchmodat2),
             SyscallNum::NR_fchown => handle!(fchown),
             SyscallNum::NR_fchownat => handle!(fchownat),
             SyscallNum::NR_fcntl => handle!(fcntl),
@@ -656,7 +674,10 @@ impl SyscallHandler {
     }
 
     /// Run a legacy C syscall handler.
-    fn legacy_syscall(syscall: LegacySyscallFn, ctx: &mut SyscallContext) -> SyscallResult {
+    fn legacy_syscall<T: From<SyscallReg>>(
+        syscall: LegacySyscallFn,
+        ctx: &mut SyscallContext,
+    ) -> Result<T, SyscallError> {
         let rv: SyscallResult =
             unsafe { syscall(ctx.handler, std::ptr::from_ref(ctx.args)) }.into();
 
@@ -673,7 +694,7 @@ impl SyscallHandler {
                 .expect("flushing syscall ptrs");
         }
 
-        rv
+        rv.map(Into::into)
     }
 }
 
@@ -714,42 +735,50 @@ pub trait SyscallHandlerFn<T> {
     fn call(self, ctx: &mut SyscallContext) -> SyscallResult;
 }
 
-impl<F, T0> SyscallHandlerFn<()> for F
+impl<F, E, T0> SyscallHandlerFn<()> for F
 where
-    F: Fn(&mut SyscallContext) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
 {
     fn call(self, ctx: &mut SyscallContext) -> SyscallResult {
-        self(ctx).map(Into::into)
+        self(ctx).map(Into::into).map_err(Into::into)
     }
 }
 
-impl<F, T0, T1> SyscallHandlerFn<(T1,)> for F
+impl<F, E, T0, T1> SyscallHandlerFn<(T1,)> for F
 where
-    F: Fn(&mut SyscallContext, T1) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext, T1) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
     T1: From<SyscallReg>,
 {
     fn call(self, ctx: &mut SyscallContext) -> SyscallResult {
-        self(ctx, ctx.args.get(0).into()).map(Into::into)
+        self(ctx, ctx.args.get(0).into())
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 
-impl<F, T0, T1, T2> SyscallHandlerFn<(T1, T2)> for F
+impl<F, E, T0, T1, T2> SyscallHandlerFn<(T1, T2)> for F
 where
-    F: Fn(&mut SyscallContext, T1, T2) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext, T1, T2) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
     T1: From<SyscallReg>,
     T2: From<SyscallReg>,
 {
     fn call(self, ctx: &mut SyscallContext) -> SyscallResult {
-        self(ctx, ctx.args.get(0).into(), ctx.args.get(1).into()).map(Into::into)
+        self(ctx, ctx.args.get(0).into(), ctx.args.get(1).into())
+            .map(Into::into)
+            .map_err(Into::into)
     }
 }
 
-impl<F, T0, T1, T2, T3> SyscallHandlerFn<(T1, T2, T3)> for F
+impl<F, E, T0, T1, T2, T3> SyscallHandlerFn<(T1, T2, T3)> for F
 where
-    F: Fn(&mut SyscallContext, T1, T2, T3) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext, T1, T2, T3) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
     T1: From<SyscallReg>,
     T2: From<SyscallReg>,
@@ -763,12 +792,14 @@ where
             ctx.args.get(2).into(),
         )
         .map(Into::into)
+        .map_err(Into::into)
     }
 }
 
-impl<F, T0, T1, T2, T3, T4> SyscallHandlerFn<(T1, T2, T3, T4)> for F
+impl<F, E, T0, T1, T2, T3, T4> SyscallHandlerFn<(T1, T2, T3, T4)> for F
 where
-    F: Fn(&mut SyscallContext, T1, T2, T3, T4) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext, T1, T2, T3, T4) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
     T1: From<SyscallReg>,
     T2: From<SyscallReg>,
@@ -784,12 +815,14 @@ where
             ctx.args.get(3).into(),
         )
         .map(Into::into)
+        .map_err(Into::into)
     }
 }
 
-impl<F, T0, T1, T2, T3, T4, T5> SyscallHandlerFn<(T1, T2, T3, T4, T5)> for F
+impl<F, E, T0, T1, T2, T3, T4, T5> SyscallHandlerFn<(T1, T2, T3, T4, T5)> for F
 where
-    F: Fn(&mut SyscallContext, T1, T2, T3, T4, T5) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext, T1, T2, T3, T4, T5) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
     T1: From<SyscallReg>,
     T2: From<SyscallReg>,
@@ -807,12 +840,14 @@ where
             ctx.args.get(4).into(),
         )
         .map(Into::into)
+        .map_err(Into::into)
     }
 }
 
-impl<F, T0, T1, T2, T3, T4, T5, T6> SyscallHandlerFn<(T1, T2, T3, T4, T5, T6)> for F
+impl<F, E, T0, T1, T2, T3, T4, T5, T6> SyscallHandlerFn<(T1, T2, T3, T4, T5, T6)> for F
 where
-    F: Fn(&mut SyscallContext, T1, T2, T3, T4, T5, T6) -> Result<T0, SyscallError>,
+    F: Fn(&mut SyscallContext, T1, T2, T3, T4, T5, T6) -> Result<T0, E>,
+    E: Into<SyscallError>,
     T0: Into<SyscallReg>,
     T1: From<SyscallReg>,
     T2: From<SyscallReg>,
@@ -832,6 +867,7 @@ where
             ctx.args.get(5).into(),
         )
         .map(Into::into)
+        .map_err(Into::into)
     }
 }
 

@@ -2,7 +2,6 @@ use linux_api::errno::Errno;
 use linux_api::signal::{defaultaction, siginfo_t, LinuxDefaultAction, Signal, SignalHandler};
 use shadow_shim_helper_rs::explicit_drop::{ExplicitDrop, ExplicitDropper};
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
-use syscall_logger::log_syscall;
 
 use crate::cshadow as c;
 use crate::host::process::Process;
@@ -11,13 +10,17 @@ use crate::host::syscall::types::SyscallError;
 use crate::host::thread::Thread;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* pid */ linux_api::posix_types::kernel_pid_t,
-                  /* sig */ std::ffi::c_int)]
+    log_syscall!(
+        kill,
+        /* rv */ std::ffi::c_int,
+        /* pid */ linux_api::posix_types::kernel_pid_t,
+        /* sig */ std::ffi::c_int,
+    );
     pub fn kill(
         ctx: &mut SyscallContext,
         pid: linux_api::posix_types::kernel_pid_t,
         sig: std::ffi::c_int,
-    ) -> Result<(), SyscallError> {
+    ) -> Result<(), Errno> {
         log::trace!("kill called on pid {pid} with signal {sig}");
 
         let pid = if pid == -1 {
@@ -27,7 +30,7 @@ impl SyscallHandler {
             // Currently unimplemented, and unlikely to be needed in the context of a shadow
             // simulation.
             log::warn!("kill with pid=-1 unimplemented");
-            return Err(Errno::ENOTSUP.into());
+            return Err(Errno::ENOTSUP);
         } else if pid == 0 {
             // kill(2): If pid equals 0, then sig is sent to every process in the process group of
             // the calling process.
@@ -52,7 +55,7 @@ impl SyscallHandler {
 
         let Some(target_process) = ctx.objs.host.process_borrow(pid) else {
             log::debug!("Process {pid} not found");
-            return Err(Errno::ESRCH.into());
+            return Err(Errno::ESRCH);
         };
         let target_process = &*target_process.borrow(ctx.objs.host.root());
 
@@ -65,18 +68,18 @@ impl SyscallHandler {
         objs: &ThreadContext,
         target_process: &Process,
         signal: std::ffi::c_int,
-    ) -> Result<(), SyscallError> {
+    ) -> Result<(), Errno> {
         if signal == 0 {
             return Ok(());
         }
 
         let Ok(signal) = Signal::try_from(signal) else {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
 
         if signal.is_realtime() {
             log::warn!("Unimplemented signal {signal:?}");
-            return Err(Errno::ENOTSUP.into());
+            return Err(Errno::ENOTSUP);
         }
 
         let sender_pid = objs.process.id().into();
@@ -87,19 +90,23 @@ impl SyscallHandler {
         Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* pid */ linux_api::posix_types::kernel_pid_t,
-                  /* sig */ std::ffi::c_int)]
+    log_syscall!(
+        tkill,
+        /* rv */ std::ffi::c_int,
+        /* pid */ linux_api::posix_types::kernel_pid_t,
+        /* sig */ std::ffi::c_int,
+    );
     pub fn tkill(
         ctx: &mut SyscallContext,
         tid: linux_api::posix_types::kernel_pid_t,
         sig: std::ffi::c_int,
-    ) -> Result<(), SyscallError> {
+    ) -> Result<(), Errno> {
         log::trace!("tkill called on tid {tid} with signal {sig}");
 
         let tid = tid.try_into().or(Err(Errno::ESRCH))?;
 
         let Some(target_thread) = ctx.objs.host.thread_cloned_rc(tid) else {
-            return Err(Errno::ESRCH.into());
+            return Err(Errno::ESRCH);
         };
         let target_thread = ExplicitDropper::new(target_thread, |value| {
             value.explicit_drop(ctx.objs.host.root())
@@ -109,21 +116,26 @@ impl SyscallHandler {
         Self::signal_thread(ctx.objs, target_thread, sig)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* tgid */ linux_api::posix_types::kernel_pid_t,
-                  /* pid */ linux_api::posix_types::kernel_pid_t, /* sig */ std::ffi::c_int)]
+    log_syscall!(
+        tgkill,
+        /* rv */ std::ffi::c_int,
+        /* tgid */ linux_api::posix_types::kernel_pid_t,
+        /* pid */ linux_api::posix_types::kernel_pid_t,
+        /* sig */ std::ffi::c_int,
+    );
     pub fn tgkill(
         ctx: &mut SyscallContext,
         tgid: linux_api::posix_types::kernel_pid_t,
         tid: linux_api::posix_types::kernel_pid_t,
         sig: std::ffi::c_int,
-    ) -> Result<(), SyscallError> {
+    ) -> Result<(), Errno> {
         log::trace!("tgkill called on tgid {tgid} and tid {tid} with signal {sig}");
 
         let tgid = tgid.try_into().or(Err(Errno::ESRCH))?;
         let tid = tid.try_into().or(Err(Errno::ESRCH))?;
 
         let Some(target_thread) = ctx.objs.host.thread_cloned_rc(tid) else {
-            return Err(Errno::ESRCH.into());
+            return Err(Errno::ESRCH);
         };
         let target_thread = ExplicitDropper::new(target_thread, |value| {
             value.explicit_drop(ctx.objs.host.root())
@@ -131,7 +143,7 @@ impl SyscallHandler {
         let target_thread = &*target_thread.borrow(ctx.objs.host.root());
 
         if target_thread.process_id() != tgid {
-            return Err(Errno::ESRCH.into());
+            return Err(Errno::ESRCH);
         }
 
         Self::signal_thread(ctx.objs, target_thread, sig)
@@ -143,18 +155,18 @@ impl SyscallHandler {
         objs: &ThreadContext,
         target_thread: &Thread,
         signal: std::ffi::c_int,
-    ) -> Result<(), SyscallError> {
+    ) -> Result<(), Errno> {
         if signal == 0 {
             return Ok(());
         }
 
         let Ok(signal) = Signal::try_from(signal) else {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
 
         if signal.is_realtime() {
             log::warn!("Unimplemented signal {signal:?}");
-            return Err(Errno::ENOTSUP.into());
+            return Err(Errno::ENOTSUP);
         }
 
         // need to scope the shmem lock since `wakeup_for_signal` below takes its own shmem lock
@@ -235,9 +247,14 @@ impl SyscallHandler {
         Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* sig */ std::ffi::c_int,
-                  /* act */ *const std::ffi::c_void, /* oact */ *const std::ffi::c_void,
-                  /* sigsetsize */ libc::size_t)]
+    log_syscall!(
+        rt_sigaction,
+        /* rv */ std::ffi::c_int,
+        /* sig */ std::ffi::c_int,
+        /* act */ *const std::ffi::c_void,
+        /* oact */ *const std::ffi::c_void,
+        /* sigsetsize */ libc::size_t,
+    );
     pub fn rt_sigaction(
         ctx: &mut SyscallContext,
         _sig: std::ffi::c_int,
@@ -245,14 +262,19 @@ impl SyscallHandler {
         _oact: ForeignPtr<linux_api::signal::sigaction>,
         _sigsetsize: libc::size_t,
     ) -> Result<(), SyscallError> {
-        let rv = Self::legacy_syscall(c::syscallhandler_rt_sigaction, ctx)?;
-        assert_eq!(0, i32::from(rv));
+        let rv: i32 = Self::legacy_syscall(c::syscallhandler_rt_sigaction, ctx)?;
+        assert_eq!(rv, 0);
         Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* how */ std::ffi::c_int,
-                  /* nset */ *const std::ffi::c_void, /* oset */ *const std::ffi::c_void,
-                  /* sigsetsize */ libc::size_t)]
+    log_syscall!(
+        rt_sigprocmask,
+        /* rv */ std::ffi::c_int,
+        /* how */ std::ffi::c_int,
+        /* nset */ *const std::ffi::c_void,
+        /* oset */ *const std::ffi::c_void,
+        /* sigsetsize */ libc::size_t,
+    );
     pub fn rt_sigprocmask(
         ctx: &mut SyscallContext,
         _how: std::ffi::c_int,
@@ -260,20 +282,24 @@ impl SyscallHandler {
         _oset: ForeignPtr<linux_api::signal::sigset_t>,
         _sigsetsize: libc::size_t,
     ) -> Result<(), SyscallError> {
-        let rv = Self::legacy_syscall(c::syscallhandler_rt_sigprocmask, ctx)?;
-        assert_eq!(0, i32::from(rv));
+        let rv: i32 = Self::legacy_syscall(c::syscallhandler_rt_sigprocmask, ctx)?;
+        assert_eq!(rv, 0);
         Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* uss */ *const std::ffi::c_void,
-                  /* uoss */ *const std::ffi::c_void)]
+    log_syscall!(
+        sigaltstack,
+        /* rv */ std::ffi::c_int,
+        /* uss */ *const std::ffi::c_void,
+        /* uoss */ *const std::ffi::c_void,
+    );
     pub fn sigaltstack(
         ctx: &mut SyscallContext,
         _uss: ForeignPtr<linux_api::signal::stack_t>,
         _uoss: ForeignPtr<linux_api::signal::stack_t>,
     ) -> Result<(), SyscallError> {
-        let rv = Self::legacy_syscall(c::syscallhandler_sigaltstack, ctx)?;
-        assert_eq!(0, i32::from(rv));
+        let rv: i32 = Self::legacy_syscall(c::syscallhandler_sigaltstack, ctx)?;
+        assert_eq!(rv, 0);
         Ok(())
     }
 }

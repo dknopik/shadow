@@ -5,7 +5,6 @@ use linux_api::errno::Errno;
 use linux_api::fcntl::OFlag;
 use linux_api::mman::{MapFlags, ProtFlags};
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
-use syscall_logger::log_syscall;
 
 use crate::cshadow as c;
 use crate::host::descriptor::{CompatFile, FileState};
@@ -14,7 +13,11 @@ use crate::host::syscall::handler::{SyscallContext, SyscallHandler, ThreadContex
 use crate::host::syscall::types::SyscallError;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* addr */ *const std::ffi::c_void)]
+    log_syscall!(
+        brk,
+        /* rv */ std::ffi::c_int,
+        /* addr */ *const std::ffi::c_void,
+    );
     pub fn brk(
         ctx: &mut SyscallContext,
         addr: ForeignPtr<u8>,
@@ -30,9 +33,15 @@ impl SyscallHandler {
     //                 unsigned long, new_len, unsigned long, flags,
     //                 unsigned long, new_addr)
     // ```
-    #[log_syscall(/* rv */ *const std::ffi::c_void, /* old_address */ *const std::ffi::c_void,
-                  /* old_size */ std::ffi::c_ulong, /* new_size */ std::ffi::c_ulong,
-                  /* flags */ linux_api::mman::MRemapFlags, /* new_address */ *const std::ffi::c_void)]
+    log_syscall!(
+        mremap,
+        /* rv */ *const std::ffi::c_void,
+        /* old_address */ *const std::ffi::c_void,
+        /* old_size */ std::ffi::c_ulong,
+        /* new_size */ std::ffi::c_ulong,
+        /* flags */ linux_api::mman::MRemapFlags,
+        /* new_address */ *const std::ffi::c_void,
+    );
     pub fn mremap(
         ctx: &mut SyscallContext,
         old_addr: std::ffi::c_ulong,
@@ -66,7 +75,12 @@ impl SyscallHandler {
     // ```
     // SYSCALL_DEFINE2(munmap, unsigned long, addr, size_t, len)
     // ```
-    #[log_syscall(/* rv */ std::ffi::c_int, /* addr */ *const std::ffi::c_void, /* length */ usize)]
+    log_syscall!(
+        munmap,
+        /* rv */ std::ffi::c_int,
+        /* addr */ *const std::ffi::c_void,
+        /* length */ usize,
+    );
     pub fn munmap(
         ctx: &mut SyscallContext,
         addr: std::ffi::c_ulong,
@@ -84,14 +98,19 @@ impl SyscallHandler {
     // ```
     // SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len, unsigned long, prot)
     // ```
-    #[log_syscall(/* rv */ std::ffi::c_int, /* addr */ *const std::ffi::c_void, /* len */ usize,
-                  /* prot */ linux_api::mman::ProtFlags)]
+    log_syscall!(
+        mprotect,
+        /* rv */ std::ffi::c_int,
+        /* addr */ *const std::ffi::c_void,
+        /* len */ usize,
+        /* prot */ linux_api::mman::ProtFlags,
+    );
     pub fn mprotect(
         ctx: &mut SyscallContext,
         addr: std::ffi::c_ulong,
         len: usize,
         prot: std::ffi::c_ulong,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), SyscallError> {
         let addr: usize = addr.try_into().unwrap();
         let addr = ForeignPtr::<()>::from(addr).cast::<u8>();
 
@@ -119,10 +138,16 @@ impl SyscallHandler {
     //                 unsigned long, prot, unsigned long, flags,
     //                 unsigned long, fd, unsigned long, off)
     // ```
-    #[log_syscall(/* rv */ *const std::ffi::c_void, /* addr */ *const std::ffi::c_void,
-                  /* length */ usize, /* prot */ linux_api::mman::ProtFlags,
-                  /* flags */ linux_api::mman::MapFlags, /* fd */ std::ffi::c_ulong,
-                  /* offset */ std::ffi::c_ulong)]
+    log_syscall!(
+        mmap,
+        /* rv */ *const std::ffi::c_void,
+        /* addr */ *const std::ffi::c_void,
+        /* length */ usize,
+        /* prot */ linux_api::mman::ProtFlags,
+        /* flags */ linux_api::mman::MapFlags,
+        /* fd */ std::ffi::c_ulong,
+        /* offset */ std::ffi::c_ulong,
+    );
     pub fn mmap(
         ctx: &mut SyscallContext,
         addr: std::ffi::c_ulong,
@@ -131,7 +156,7 @@ impl SyscallHandler {
         flags: std::ffi::c_ulong,
         fd: std::ffi::c_ulong,
         offset: std::ffi::c_ulong,
-    ) -> Result<ForeignPtr<u8>, SyscallError> {
+    ) -> Result<ForeignPtr<u8>, Errno> {
         log::trace!("mmap called on fd {fd} for {len} bytes");
 
         let addr: usize = addr.try_into().unwrap();
@@ -151,7 +176,7 @@ impl SyscallHandler {
                 "Unrecognized prot flag: {:#x}",
                 unrecognized.bits()
             );
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
         let Some(flags) = MapFlags::from_bits(flags) else {
             let unrecognized = MapFlags::from_bits_retain(flags).difference(MapFlags::all());
@@ -163,7 +188,7 @@ impl SyscallHandler {
                 "Unrecognized map flag: {:#x}",
                 unrecognized.bits()
             );
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         };
 
         // at least one of these values is required according to man page
@@ -173,14 +198,14 @@ impl SyscallHandler {
         // need non-zero len, and at least one of the above options
         if len == 0 || !required_flags.intersects(flags) {
             log::debug!("Invalid len ({len}), prot ({prot:?}), or flags ({flags:?})");
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         // we ignore the fd on anonymous mappings, otherwise it must refer to a regular file
         // TODO: why does this fd <= 2 exist?
         if fd <= 2 && !flags.contains(MapFlags::MAP_ANONYMOUS) {
             log::debug!("Invalid fd {fd} and MAP_ANONYMOUS is not set in flags {flags:?}");
-            return Err(Errno::EBADF.into());
+            return Err(Errno::EBADF);
         }
 
         // we only need a file if it's not an anonymous mapping
@@ -194,7 +219,7 @@ impl SyscallHandler {
 
                 let CompatFile::Legacy(file) = desc.file() else {
                     // this syscall uses a regular file, which is implemented in C
-                    return Err(Errno::EINVAL.into());
+                    return Err(Errno::EINVAL);
                 };
 
                 file.ptr()
@@ -209,12 +234,12 @@ impl SyscallHandler {
                 // close themselves even if there are still file handles (see
                 // `_tcp_endOfFileSignalled`), so we can't make this a panic.
                 log::warn!("File {file:p} (fd={fd}) is closed");
-                return Err(Errno::EBADF.into());
+                return Err(Errno::EBADF);
             }
 
             if unsafe { c::legacyfile_getType(file) } != c::_LegacyFileType_DT_FILE {
                 log::debug!("Descriptor exists for fd {fd}, but is not a regular file type");
-                return Err(Errno::EACCES.into());
+                return Err(Errno::EACCES);
             }
 
             // success; we know we have a file type descriptor
@@ -228,7 +253,7 @@ impl SyscallHandler {
         // the file is None for an anonymous mapping, or a non-null Some otherwise
         let Ok(plugin_fd) = plugin_fd.transpose() else {
             log::warn!("mmap on fd {fd} for {len} bytes failed");
-            return Err(Errno::EACCES.into());
+            return Err(Errno::EACCES);
         };
 
         // delegate execution of the mmap itself to the memory manager
@@ -242,10 +267,6 @@ impl SyscallHandler {
             plugin_fd.unwrap_or(-1),
             offset,
         );
-
-        // we should have already run the mmap natively above, and it wouldn't make sense to return
-        // `SyscallError::Native` here
-        assert!(!matches!(mmap_result, Err(SyscallError::Native)));
 
         log::trace!(
             "Plugin-native mmap syscall at plugin addr {addr:p} with plugin fd {fd} for \

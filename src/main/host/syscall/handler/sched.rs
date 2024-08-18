@@ -1,12 +1,13 @@
+use std::mem::MaybeUninit;
+
 use linux_api::errno::Errno;
 use linux_api::posix_types::kernel_pid_t;
 use linux_api::rseq::rseq;
 use log::warn;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
-use syscall_logger::log_syscall;
 
 use crate::host::syscall::handler::{SyscallContext, SyscallHandler};
-use crate::host::syscall::types::{ForeignArrayPtr, SyscallError};
+use crate::host::syscall::types::ForeignArrayPtr;
 use crate::host::thread::ThreadId;
 
 // We always report that the thread is running on CPU 0, Node 0
@@ -15,7 +16,13 @@ const CURRENT_CPU: u32 = 0;
 const RSEQ_FLAG_UNREGISTER: i32 = 1;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ i32, /* pid */ kernel_pid_t, /* cpusetsize */ usize, /* mask */ *const std::ffi::c_void)]
+    log_syscall!(
+        sched_getaffinity,
+        /* rv */ i32,
+        /* pid */ kernel_pid_t,
+        /* cpusetsize */ usize,
+        /* mask */ *const std::ffi::c_void,
+    );
     pub fn sched_getaffinity(
         ctx: &mut SyscallContext,
         tid: kernel_pid_t,
@@ -25,19 +32,19 @@ impl SyscallHandler {
         // > of type unsigned long *) impose no restriction on the size of the CPU
         // > mask
         mask_ptr: ForeignPtr<std::ffi::c_ulong>,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<std::ffi::c_int, Errno> {
         let mask_ptr = mask_ptr.cast::<u8>();
         let mask_ptr = ForeignArrayPtr::new(mask_ptr, cpusetsize);
 
         let tid = ThreadId::try_from(tid).or(Err(Errno::ESRCH))?;
         if !ctx.objs.host.has_thread(tid) && kernel_pid_t::from(tid) != 0 {
-            return Err(Errno::ESRCH.into());
+            return Err(Errno::ESRCH);
         }
 
         // Shadow doesn't have users, so no need to check for permissions
 
         if cpusetsize == 0 {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         let mut mem = ctx.objs.process.memory_borrow_mut();
@@ -52,7 +59,13 @@ impl SyscallHandler {
         Ok(bytes_written)
     }
 
-    #[log_syscall(/* rv */ i32, /* pid */ kernel_pid_t, /* cpusetsize */ usize, /* mask */ *const std::ffi::c_void)]
+    log_syscall!(
+        sched_setaffinity,
+        /* rv */ i32,
+        /* pid */ kernel_pid_t,
+        /* cpusetsize */ usize,
+        /* mask */ *const std::ffi::c_void,
+    );
     pub fn sched_setaffinity(
         ctx: &mut SyscallContext,
         tid: kernel_pid_t,
@@ -62,19 +75,19 @@ impl SyscallHandler {
         // > of type unsigned long *) impose no restriction on the size of the CPU
         // > mask
         mask_ptr: ForeignPtr<std::ffi::c_ulong>,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), Errno> {
         let mask_ptr = mask_ptr.cast::<u8>();
         let mask_ptr = ForeignArrayPtr::new(mask_ptr, cpusetsize);
 
         let tid = ThreadId::try_from(tid).or(Err(Errno::ESRCH))?;
         if !ctx.objs.host.has_thread(tid) && kernel_pid_t::from(tid) != 0 {
-            return Err(Errno::ESRCH.into());
+            return Err(Errno::ESRCH);
         };
 
         // Shadow doesn't have users, so no need to check for permissions
 
         if cpusetsize == 0 {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
         let mem = ctx.objs.process.memory_borrow_mut();
@@ -82,43 +95,34 @@ impl SyscallHandler {
 
         // this assumes little endian
         if mask[0] & 0x01 == 0 {
-            return Err(Errno::EINVAL.into());
+            return Err(Errno::EINVAL);
         }
 
-        Ok(0)
+        Ok(())
     }
 
-    #[log_syscall(/* rv */ i32, /* rseq */ *const std::ffi::c_void, /* rseq_len */ u32, /* flags */ i32, /* sig */ u32)]
+    log_syscall!(
+        rseq,
+        /* rv */ i32,
+        /* rseq */ *const std::ffi::c_void,
+        /* rseq_len */ u32,
+        /* flags */ i32,
+        /* sig */ u32,
+    );
     pub fn rseq(
         ctx: &mut SyscallContext,
-        rseq_ptr: ForeignPtr<linux_api::rseq::rseq>,
+        rseq_ptr: ForeignPtr<MaybeUninit<u8>>,
         rseq_len: u32,
         flags: std::ffi::c_int,
-        sig: u32,
-    ) -> Result<std::ffi::c_int, SyscallError> {
-        let rseq_len = usize::try_from(rseq_len).unwrap();
-        if rseq_len != std::mem::size_of::<rseq>() {
-            // Probably worth a warning; decent chance that the bug is in Shadow
-            // rather than the calling code.
-            warn!(
-                "rseq_len {} instead of expected {}",
-                rseq_len,
-                std::mem::size_of::<rseq>()
-            );
-            return Err(Errno::EINVAL.into());
-        }
-        Self::rseq_impl(ctx, rseq_ptr, flags, sig)
-    }
-
-    fn rseq_impl(
-        ctx: &mut SyscallContext,
-        rseq_ptr: ForeignPtr<linux_api::rseq::rseq>,
-        flags: i32,
         _sig: u32,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), Errno> {
+        // we won't need more bytes than the size of the `rseq` struct
+        let rseq_len = rseq_len.try_into().unwrap();
+        let rseq_len = std::cmp::min(rseq_len, std::mem::size_of::<rseq>());
+
         if flags & (!RSEQ_FLAG_UNREGISTER) != 0 {
-            warn!("Unrecognized rseq flags: {}", flags);
-            return Err(Errno::EINVAL.into());
+            warn!("Unrecognized rseq flags: {flags}");
+            return Err(Errno::EINVAL);
         }
         if flags & RSEQ_FLAG_UNREGISTER != 0 {
             // TODO:
@@ -126,10 +130,20 @@ impl SyscallHandler {
             // * Validate that `sig` matches registration
             // * Set the cpu_id of the previously registerd rseq to the uninitialized
             //   state.
-            return Ok(0);
+            return Ok(());
         }
+
+        // The `rseq` struct is designed to grow as linux needs to add more features, so we can't
+        // assume that the application making the rseq syscall is using the exact same struct as we
+        // have available in the linux_api crate (the calling application's rseq struct may have
+        // more or fewer fields). Furthermore, the rseq struct ends with a "flexible array member",
+        // which means that the rseq struct cannot be `Copy` and therefore not `Pod`.
+        //
+        // Instead, we should treat the rseq struct as a bunch of bytes and write to individual
+        // fields if possible without making assumptions about the size of the data.
         let mut mem = ctx.objs.process.memory_borrow_mut();
-        let mut rseq = mem.memory_ref_mut(ForeignArrayPtr::new(rseq_ptr, 1))?;
+        let mut rseq_mem = mem.memory_ref_mut(ForeignArrayPtr::new(rseq_ptr, rseq_len))?;
+        let rseq_bytes = &mut *rseq_mem;
 
         // rseq is mostly unimplemented, but also mostly unneeded in Shadow.
         // We'd only need to implement the "real" functionality if we ever implement
@@ -144,12 +158,19 @@ impl SyscallHandler {
         // invalid address, raising SIGSEGV, but then catching it and recovering
         // in a handler.
         // https://github.com/shadow/shadow/issues/2139
-
+        //
         // For now we just update to reflect that the thread is running on CPU 0.
-        rseq[0].cpu_id = CURRENT_CPU;
-        rseq[0].cpu_id_start = CURRENT_CPU;
-        rseq.flush()?;
 
-        Ok(0)
+        let Some((cpu_id, cpu_id_start)) = field_project!(rseq_bytes, rseq, (cpu_id, cpu_id_start))
+        else {
+            return Err(Errno::EINVAL);
+        };
+
+        cpu_id.write(CURRENT_CPU);
+        cpu_id_start.write(CURRENT_CPU);
+
+        rseq_mem.flush()?;
+
+        Ok(())
     }
 }

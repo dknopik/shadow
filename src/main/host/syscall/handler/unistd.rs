@@ -11,11 +11,11 @@ use shadow_shim_helper_rs::emulated_time::EmulatedTime;
 use shadow_shim_helper_rs::rootedcell::refcell::RootedRefCell;
 use shadow_shim_helper_rs::simulation_time::SimulationTime;
 use shadow_shim_helper_rs::syscall_types::ForeignPtr;
-use syscall_logger::log_syscall;
 
 use crate::core::work::task::TaskRef;
 use crate::core::worker::Worker;
 use crate::cshadow as c;
+use crate::host::descriptor::descriptor_table::DescriptorHandle;
 use crate::host::descriptor::pipe;
 use crate::host::descriptor::shared_buf::SharedBuf;
 use crate::host::descriptor::{CompatFile, Descriptor, File, FileMode, FileStatus, OpenFile};
@@ -23,13 +23,17 @@ use crate::host::process::{Process, ProcessId};
 use crate::host::syscall::handler::{SyscallContext, SyscallHandler};
 use crate::host::syscall::io::{read_cstring_vec, IoVec};
 use crate::host::syscall::type_formatting::{SyscallBufferArg, SyscallStringArg};
-use crate::host::syscall::types::{ForeignArrayPtr, SyscallError, SyscallResult};
+use crate::host::syscall::types::{ForeignArrayPtr, SyscallError};
 use crate::utility::callback_queue::CallbackQueue;
 use crate::utility::u8_to_i8_slice;
 
 impl SyscallHandler {
-    #[log_syscall(/* rv */ std::ffi::c_int, /* fd */ std::ffi::c_int)]
-    pub fn close(ctx: &mut SyscallContext, fd: std::ffi::c_int) -> SyscallResult {
+    log_syscall!(
+        close,
+        /* rv */ std::ffi::c_int,
+        /* fd */ std::ffi::c_int,
+    );
+    pub fn close(ctx: &mut SyscallContext, fd: std::ffi::c_int) -> Result<(), SyscallError> {
         trace!("Trying to close fd {}", fd);
 
         let fd = fd.try_into().or(Err(linux_api::errno::Errno::EBADF))?;
@@ -49,32 +53,44 @@ impl SyscallHandler {
         crate::utility::legacy_callback_queue::with_global_cb_queue(|| {
             CallbackQueue::queue_and_run(|cb_queue| desc.close(ctx.objs.host, cb_queue))
                 .unwrap_or(Ok(()))
-                .map(|()| 0.into())
         })
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* oldfd */ std::ffi::c_int)]
-    pub fn dup(ctx: &mut SyscallContext, fd: std::ffi::c_int) -> SyscallResult {
+    log_syscall!(
+        dup,
+        /* rv */ std::ffi::c_int,
+        /* oldfd */ std::ffi::c_int,
+    );
+    pub fn dup(
+        ctx: &mut SyscallContext,
+        fd: std::ffi::c_int,
+    ) -> Result<DescriptorHandle, SyscallError> {
         // get the descriptor, or return early if it doesn't exist
         let mut desc_table = ctx.objs.thread.descriptor_table_borrow_mut(ctx.objs.host);
         let desc = Self::get_descriptor(&desc_table, fd)?;
 
         // duplicate the descriptor
         let new_desc = desc.dup(DescriptorFlags::empty());
-        let new_fd = desc_table
-            .register_descriptor(new_desc)
-            .or(Err(Errno::ENFILE))?;
 
-        // return the new fd
-        Ok(std::ffi::c_int::from(new_fd).into())
+        Ok(desc_table
+            .register_descriptor(new_desc)
+            .or(Err(Errno::ENFILE))?)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* oldfd */ std::ffi::c_int, /* newfd */ std::ffi::c_int)]
+    log_syscall!(
+        dup2,
+        /* rv */ std::ffi::c_int,
+        /* oldfd */ std::ffi::c_int,
+        /* newfd */ std::ffi::c_int,
+    );
     pub fn dup2(
         ctx: &mut SyscallContext,
         old_fd: std::ffi::c_int,
         new_fd: std::ffi::c_int,
-    ) -> SyscallResult {
+    ) -> Result<DescriptorHandle, SyscallError> {
+        let old_fd = DescriptorHandle::try_from(old_fd).or(Err(Errno::EBADF))?;
+        let new_fd = DescriptorHandle::try_from(new_fd).or(Err(Errno::EBADF))?;
+
         // get the descriptor, or return early if it doesn't exist
         let mut desc_table = ctx.objs.thread.descriptor_table_borrow_mut(ctx.objs.host);
         let desc = Self::get_descriptor(&desc_table, old_fd)?;
@@ -82,10 +98,8 @@ impl SyscallHandler {
         // from 'man 2 dup2': "If oldfd is a valid file descriptor, and newfd has the same
         // value as oldfd, then dup2() does nothing, and returns newfd"
         if old_fd == new_fd {
-            return Ok(new_fd.into());
+            return Ok(new_fd);
         }
-
-        let new_fd = new_fd.try_into().or(Err(linux_api::errno::Errno::EBADF))?;
 
         // duplicate the descriptor
         let new_desc = desc.dup(DescriptorFlags::empty());
@@ -95,21 +109,30 @@ impl SyscallHandler {
         if let Some(replaced_desc) = replaced_desc {
             // from 'man 2 dup2': "If newfd was open, any errors that would have been reported at
             // close(2) time are lost"
-            CallbackQueue::queue_and_run(|cb_queue| replaced_desc.close(ctx.objs.host, cb_queue));
+            crate::utility::legacy_callback_queue::with_global_cb_queue(|| {
+                CallbackQueue::queue_and_run(|cb_queue| {
+                    replaced_desc.close(ctx.objs.host, cb_queue)
+                })
+            });
         }
 
         // return the new fd
-        Ok(std::ffi::c_int::from(new_fd).into())
+        Ok(new_fd)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* oldfd */ std::ffi::c_int, /* newfd */ std::ffi::c_int,
-                  /* flags */ linux_api::fcntl::OFlag)]
+    log_syscall!(
+        dup3,
+        /* rv */ std::ffi::c_int,
+        /* oldfd */ std::ffi::c_int,
+        /* newfd */ std::ffi::c_int,
+        /* flags */ linux_api::fcntl::OFlag,
+    );
     pub fn dup3(
         ctx: &mut SyscallContext,
         old_fd: std::ffi::c_int,
         new_fd: std::ffi::c_int,
         flags: std::ffi::c_int,
-    ) -> SyscallResult {
+    ) -> Result<DescriptorHandle, SyscallError> {
         // get the descriptor, or return early if it doesn't exist
         let mut desc_table = ctx.objs.thread.descriptor_table_borrow_mut(ctx.objs.host);
         let desc = Self::get_descriptor(&desc_table, old_fd)?;
@@ -150,15 +173,24 @@ impl SyscallHandler {
         if let Some(replaced_desc) = replaced_desc {
             // from 'man 2 dup3': "If newfd was open, any errors that would have been reported at
             // close(2) time are lost"
-            CallbackQueue::queue_and_run(|cb_queue| replaced_desc.close(ctx.objs.host, cb_queue));
+            crate::utility::legacy_callback_queue::with_global_cb_queue(|| {
+                CallbackQueue::queue_and_run(|cb_queue| {
+                    replaced_desc.close(ctx.objs.host, cb_queue)
+                })
+            });
         }
 
         // return the new fd
-        Ok(std::ffi::c_int::from(new_fd).into())
+        Ok(new_fd)
     }
 
-    #[log_syscall(/* rv */ isize, /* fd */ std::ffi::c_int, /* buf */ *const std::ffi::c_void,
-                  /* count */ usize)]
+    log_syscall!(
+        read,
+        /* rv */ isize,
+        /* fd */ std::ffi::c_int,
+        /* buf */ *const std::ffi::c_void,
+        /* count */ usize,
+    );
     pub fn read(
         ctx: &mut SyscallContext,
         fd: std::ffi::c_int,
@@ -185,7 +217,7 @@ impl SyscallHandler {
                     // if it's a legacy file, use the C syscall handler instead
                     CompatFile::Legacy(_) => {
                         drop(desc_table);
-                        return Self::legacy_syscall(c::syscallhandler_read, ctx).map(Into::into);
+                        return Self::legacy_syscall(c::syscallhandler_read, ctx);
                     }
                 }
             }
@@ -204,8 +236,14 @@ impl SyscallHandler {
         Ok(bytes_read)
     }
 
-    #[log_syscall(/* rv */ isize, /* fd */ std::ffi::c_int, /* buf */ *const std::ffi::c_void,
-                  /* count */ usize, /* offset */ kernel_off_t)]
+    log_syscall!(
+        pread64,
+        /* rv */ isize,
+        /* fd */ std::ffi::c_int,
+        /* buf */ *const std::ffi::c_void,
+        /* count */ usize,
+        /* offset */ kernel_off_t,
+    );
     pub fn pread64(
         ctx: &mut SyscallContext,
         fd: std::ffi::c_int,
@@ -233,8 +271,7 @@ impl SyscallHandler {
                     // if it's a legacy file, use the C syscall handler instead
                     CompatFile::Legacy(_) => {
                         drop(desc_table);
-                        return Self::legacy_syscall(c::syscallhandler_pread64, ctx)
-                            .map(Into::into);
+                        return Self::legacy_syscall(c::syscallhandler_pread64, ctx);
                     }
                 }
             }
@@ -267,8 +304,13 @@ impl SyscallHandler {
         Self::readv_helper(ctx, file, &[iov], offset, 0)
     }
 
-    #[log_syscall(/* rv */ isize, /* fd */ std::ffi::c_int,
-                  /* buf */ SyscallBufferArg</* count */ 2>, /* count */ usize)]
+    log_syscall!(
+        write,
+        /* rv */ isize,
+        /* fd */ std::ffi::c_int,
+        /* buf */ SyscallBufferArg</* count */ 2>,
+        /* count */ usize,
+    );
     pub fn write(
         ctx: &mut SyscallContext,
         fd: std::ffi::c_int,
@@ -295,7 +337,7 @@ impl SyscallHandler {
                     // if it's a legacy file, use the C syscall handler instead
                     CompatFile::Legacy(_) => {
                         drop(desc_table);
-                        return Self::legacy_syscall(c::syscallhandler_write, ctx).map(Into::into);
+                        return Self::legacy_syscall(c::syscallhandler_write, ctx);
                     }
                 }
             }
@@ -314,9 +356,14 @@ impl SyscallHandler {
         Ok(bytes_written)
     }
 
-    #[log_syscall(/* rv */ isize, /* fd */ std::ffi::c_int,
-                  /* buf */ SyscallBufferArg</* count */ 2>, /* count */ usize,
-                  /* offset */ kernel_off_t)]
+    log_syscall!(
+        pwrite64,
+        /* rv */ isize,
+        /* fd */ std::ffi::c_int,
+        /* buf */ SyscallBufferArg</* count */ 2>,
+        /* count */ usize,
+        /* offset */ kernel_off_t,
+    );
     pub fn pwrite64(
         ctx: &mut SyscallContext,
         fd: std::ffi::c_int,
@@ -344,8 +391,7 @@ impl SyscallHandler {
                     // if it's a legacy file, use the C syscall handler instead
                     CompatFile::Legacy(_) => {
                         drop(desc_table);
-                        return Self::legacy_syscall(c::syscallhandler_pwrite64, ctx)
-                            .map(Into::into);
+                        return Self::legacy_syscall(c::syscallhandler_pwrite64, ctx);
                     }
                 }
             }
@@ -379,21 +425,29 @@ impl SyscallHandler {
         Self::writev_helper(ctx, file, &[iov], offset, 0)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* pipefd */ [std::ffi::c_int; 2])]
+    log_syscall!(
+        pipe,
+        /* rv */ std::ffi::c_int,
+        /* pipefd */ [std::ffi::c_int; 2],
+    );
     pub fn pipe(
         ctx: &mut SyscallContext,
         fd_ptr: ForeignPtr<[std::ffi::c_int; 2]>,
-    ) -> SyscallResult {
+    ) -> Result<(), SyscallError> {
         Self::pipe_helper(ctx, fd_ptr, 0)
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* pipefd */ [std::ffi::c_int; 2],
-                  /* flags */ linux_api::fcntl::OFlag)]
+    log_syscall!(
+        pipe2,
+        /* rv */ std::ffi::c_int,
+        /* pipefd */ [std::ffi::c_int; 2],
+        /* flags */ linux_api::fcntl::OFlag,
+    );
     pub fn pipe2(
         ctx: &mut SyscallContext,
         fd_ptr: ForeignPtr<[std::ffi::c_int; 2]>,
         flags: std::ffi::c_int,
-    ) -> SyscallResult {
+    ) -> Result<(), SyscallError> {
         Self::pipe_helper(ctx, fd_ptr, flags)
     }
 
@@ -401,7 +455,7 @@ impl SyscallHandler {
         ctx: &mut SyscallContext,
         fd_ptr: ForeignPtr<[std::ffi::c_int; 2]>,
         flags: i32,
-    ) -> SyscallResult {
+    ) -> Result<(), SyscallError> {
         // make sure they didn't pass a NULL pointer
         if fd_ptr.is_null() {
             return Err(linux_api::errno::Errno::EFAULT.into());
@@ -469,7 +523,7 @@ impl SyscallHandler {
 
         // clean up in case of error
         match write_res {
-            Ok(_) => Ok(0.into()),
+            Ok(_) => Ok(()),
             Err(e) => {
                 CallbackQueue::queue_and_run(|cb_queue| {
                     // ignore any errors when closing
@@ -485,22 +539,26 @@ impl SyscallHandler {
         }
     }
 
-    #[log_syscall(/* rv */ linux_api::posix_types::kernel_pid_t)]
+    log_syscall!(getpid, /* rv */ linux_api::posix_types::kernel_pid_t);
     pub fn getpid(ctx: &mut SyscallContext) -> Result<kernel_pid_t, SyscallError> {
         Ok(ctx.objs.process.id().into())
     }
 
-    #[log_syscall(/* rv */ linux_api::posix_types::kernel_pid_t)]
+    log_syscall!(getppid, /* rv */ linux_api::posix_types::kernel_pid_t);
     pub fn getppid(ctx: &mut SyscallContext) -> Result<kernel_pid_t, SyscallError> {
         Ok(ctx.objs.process.parent_id().into())
     }
 
-    #[log_syscall(/* rv */ kernel_pid_t)]
+    log_syscall!(getpgrp, /* rv */ kernel_pid_t);
     pub fn getpgrp(ctx: &mut SyscallContext) -> Result<kernel_pid_t, SyscallError> {
         Ok(ctx.objs.process.group_id().into())
     }
 
-    #[log_syscall(/* rv */ kernel_pid_t, /* pid*/ kernel_pid_t)]
+    log_syscall!(
+        getpgid,
+        /* rv */ kernel_pid_t,
+        /* pid*/ kernel_pid_t,
+    );
     pub fn getpgid(
         ctx: &mut SyscallContext,
         pid: kernel_pid_t,
@@ -516,12 +574,17 @@ impl SyscallHandler {
         Ok(process.group_id().into())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* pid */ kernel_pid_t, /* pgid */kernel_pid_t)]
+    log_syscall!(
+        setpgid,
+        /* rv */ std::ffi::c_int,
+        /* pid */ kernel_pid_t,
+        /* pgid */ kernel_pid_t,
+    );
     pub fn setpgid(
         ctx: &mut SyscallContext,
         pid: kernel_pid_t,
         pgid: kernel_pid_t,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), SyscallError> {
         let _processrc_borrow;
         let _process_borrow;
         let process: &Process;
@@ -586,10 +649,14 @@ impl SyscallHandler {
             // specified by pid is made the same as its process ID.
             process.set_group_id(process.id());
         }
-        Ok(0)
+        Ok(())
     }
 
-    #[log_syscall(/* rv */ kernel_pid_t, /* pid */ kernel_pid_t)]
+    log_syscall!(
+        getsid,
+        /* rv */ kernel_pid_t,
+        /* pid */ kernel_pid_t,
+    );
     pub fn getsid(
         ctx: &mut SyscallContext,
         pid: kernel_pid_t,
@@ -613,7 +680,7 @@ impl SyscallHandler {
         Ok(process.session_id().into())
     }
 
-    #[log_syscall(/* rv */ kernel_pid_t)]
+    log_syscall!(setsid, /* rv */ kernel_pid_t);
     pub fn setsid(ctx: &mut SyscallContext) -> Result<kernel_pid_t, SyscallError> {
         let pid = ctx.objs.process.id();
         if ctx.objs.host.process_session_id_of_group_id(pid).is_some() {
@@ -769,11 +836,13 @@ impl SyscallHandler {
         Err(SyscallError::new_blocked_until(EmulatedTime::MAX, false))
     }
 
-    #[log_syscall(
+    log_syscall!(
+        execve,
         /* rv */ i32,
         /* pathname */ SyscallStringArg,
         /* argv */ *const std::ffi::c_void,
-        /* envp */ *const std::ffi::c_void)]
+        /* envp */ *const std::ffi::c_void,
+    );
     pub fn execve(
         ctx: &mut SyscallContext,
         pathname: ForeignPtr<std::ffi::c_char>,
@@ -798,13 +867,15 @@ impl SyscallHandler {
         .map(|_| 0)
     }
 
-    #[log_syscall(
+    log_syscall!(
+        execveat,
         /* rv */ i32,
         /* dirfd */ std::ffi::c_int,
         /* pathname */ SyscallStringArg,
         /* argv */ *const std::ffi::c_void,
         /* envp */ *const std::ffi::c_void,
-        /* flags */ std::ffi::c_int)]
+        /* flags */ std::ffi::c_int,
+    );
     pub fn execveat(
         _ctx: &mut SyscallContext,
         _dirfd: std::ffi::c_int,
@@ -818,7 +889,11 @@ impl SyscallHandler {
         Err(Errno::ENOSYS.into())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* error_code */ std::ffi::c_int)]
+    log_syscall!(
+        exit_group,
+        /* rv */ std::ffi::c_int,
+        /* error_code */ std::ffi::c_int,
+    );
     pub fn exit_group(
         _ctx: &mut SyscallContext,
         error_code: std::ffi::c_int,
@@ -827,8 +902,11 @@ impl SyscallHandler {
         Err(SyscallError::Native)
     }
 
-    #[log_syscall(/* rv */ linux_api::posix_types::kernel_pid_t,
-                  /* tidptr */ *const std::ffi::c_int)]
+    log_syscall!(
+        set_tid_address,
+        /* rv */ linux_api::posix_types::kernel_pid_t,
+        /* tidptr */ *const std::ffi::c_int,
+    );
     pub fn set_tid_address(
         ctx: &mut SyscallContext,
         tid_ptr: ForeignPtr<std::ffi::c_int>,
@@ -839,11 +917,15 @@ impl SyscallHandler {
         Ok(ctx.objs.thread.id().into())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* name */ *const std::ffi::c_void)]
+    log_syscall!(
+        uname,
+        /* rv */ std::ffi::c_int,
+        /* name */ *const std::ffi::c_void,
+    );
     pub fn uname(
         ctx: &mut SyscallContext,
         name_ptr: ForeignPtr<linux_api::utsname::new_utsname>,
-    ) -> Result<std::ffi::c_int, SyscallError> {
+    ) -> Result<(), SyscallError> {
         // NOTE: On linux x86-64, `SYS_uname` corresponds with `__NR_uname` which calls
         // `sys_newuname` and not `sys_uname`. The correct mapping is:
         //
@@ -873,11 +955,18 @@ impl SyscallHandler {
             .memory_borrow_mut()
             .write(name_ptr, &name)?;
 
-        Ok(0)
+        Ok(())
     }
 
-    #[log_syscall(/* rv */ std::ffi::c_int, /* path */ SyscallStringArg)]
-    pub fn chdir(ctx: &mut SyscallContext, path: ForeignPtr<std::ffi::c_char>) -> SyscallResult {
+    log_syscall!(
+        chdir,
+        /* rv */ std::ffi::c_int,
+        /* path */ SyscallStringArg,
+    );
+    pub fn chdir(
+        ctx: &mut SyscallContext,
+        path: ForeignPtr<std::ffi::c_char>,
+    ) -> Result<(), SyscallError> {
         // The native working directory must match the emulated one
         // <https://github.com/shadow/shadow/issues/2960>. First execute the
         // native chdir, propagating any failures.
@@ -902,6 +991,6 @@ impl SyscallHandler {
         newcwd.push(0);
         let newcwd = CString::from_vec_with_nul(newcwd).unwrap();
         process.process.set_current_working_dir(newcwd);
-        Ok(0.into())
+        Ok(())
     }
 }
